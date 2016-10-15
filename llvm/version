@@ -1,0 +1,14 @@
+llvm :  
+commit 8f4f26c9c7fec12eb039be6b20313a51417c97bb
+Author: Sanjay Patel <spatel@rotateright.com>
+Date:   Sat Mar 12 21:09:26 2016 +0000
+
+clang:
+commit d59a142ef50bf041797143db71d2d4777fd32d27
+Author: Nico Weber <nicolasweber@gmx.de>
+Date:   Sat Mar 12 19:55:59 2016 +0000
+
+compiler-rt:
+commit 961e78720a32929d7e4fc13a72d7266d59672c42
+Author: Nico Weber <nicolasweber@gmx.de>
+Date:   Sat Mar 12 01:57:31 2016 +0000
