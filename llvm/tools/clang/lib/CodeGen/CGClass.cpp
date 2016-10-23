@@ -2516,6 +2516,152 @@ void CodeGenFunction::EmitVTablePtrCheckForCall(const CXXRecordDecl *RD,
   EmitVTablePtrCheck(RD, VTable, TCK, Loc);
 }
 
+// crc32 bit
+// Reverses (reflects) bits in a 32-bit word.
+unsigned int crc32c(unsigned char *message) {
+	int i, j;
+	unsigned int byte, crc, mask;
+	static unsigned int table[256];
+
+	/* Set up the table, if necessary. */
+
+	if (table[1] == 0) {
+		for (byte = 0; byte <= 255; byte++) {
+			crc = byte;
+			for (j = 7; j >= 0; j--) {    // Do eight times.
+				mask = -(crc & 1);
+				crc = (crc >> 1) ^ (0xEDB88320 & mask);
+			}
+			table[byte] = crc;
+		}
+	}
+
+	/* Through with table setup, now calculate the CRC. */
+
+	i = 0;
+	crc = 0xFFFFFFFF;
+	while ((byte = message[i]) != 0) {
+		crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF];
+		i = i + 1;
+	}
+	return ~crc;
+}
+
+uint64_t crc64c(unsigned char *message) {
+	int i, j;
+	unsigned int byte;
+	uint64_t crc, mask;
+	static uint64_t table[256];
+
+	/* Set up the table, if necessary. */
+
+	if (table[1] == 0) {
+		for (byte = 0; byte <= 255; byte++) {
+			crc = byte;
+			for (j = 7; j >= 0; j--) {    // Do eight times.
+				mask = -(crc & 1);
+				crc = (crc >> 1) ^ (0xC96C5795D7870F42UL & mask);
+			}
+			table[byte] = crc;
+		}
+	}
+
+	/* Through with table setup, now calculate the CRC. */
+
+	i = 0;
+	crc = 0xFFFFFFFFFFFFFFFFUL;
+	while ((byte = message[i]) != 0) {
+		crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF];
+		i = i + 1;
+	}
+	return ~crc;
+}
+
+uint64_t GetHashValue(std::string str)
+{
+	unsigned char *className = new unsigned char[str.length() + 1];
+	strcpy((char *)className, str.c_str());
+
+	return crc64c(className);
+}
+
+void remove_useless_str(std::string& str) {
+
+	std::string::size_type i;
+
+	std::string basesuffix = ".base";
+
+	while( (i =str.find("*")) != std::string::npos) {
+		str.erase(i, 1);
+	}
+
+	while( (i =str.find("'")) != std::string::npos) {
+		str.erase(i, 1);
+	}
+
+	i = str.find(basesuffix);
+
+	if (i != std::string::npos)
+		str.erase(i, basesuffix.length());
+}
+
+void CodeGenFunction::EmitTypeSanCheckForCast(QualType T,
+                                                llvm::Value *Base,
+                                                bool MayBeNull,
+                                                CFITypeCheckKind TCK,
+                                                SourceLocation Loc) {
+
+	auto *ClassTy = T->getAs<RecordType>();
+	if (!ClassTy)
+		return;
+
+	const CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(ClassTy->getDecl());
+	if (ClassDecl->isCompleteDefinition() && ClassDecl && ClassDecl->hasDefinition() && !ClassDecl->isAnonymousStructOrUnion()) {
+		llvm::Constant *StaticData[] = {
+			EmitCheckSourceLocation(Loc),
+		};
+
+		auto &layout = getTypes().getCGRecordLayout(ClassDecl);
+		std::string dstStr = layout.getLLVMType()->getName();
+		remove_useless_str(dstStr);
+		uint64_t dstValue = GetHashValue(dstStr);
+		llvm::Value *cast =  llvm::ConstantInt::get(Int64Ty, dstValue);
+		llvm::Value *DynamicArgs[] = { Base, cast };
+
+		TypeSanEmitCheck("__type_casting_verification", StaticData,
+				DynamicArgs, dstStr, dstValue);
+	}
+}
+
+void CodeGenFunction::EmitTypeSanCheckForChangingCast(QualType T,
+                                                llvm::Value *Base,
+                                                llvm::Value *Derived,
+                                                bool MayBeNull,
+                                                CFITypeCheckKind TCK,
+                                                SourceLocation Loc) {
+
+	auto *ClassTy = T->getAs<RecordType>();
+	if (!ClassTy)
+		return;
+
+	const CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(ClassTy->getDecl());
+	if (ClassDecl->isCompleteDefinition() && ClassDecl && ClassDecl->hasDefinition() && !ClassDecl->isAnonymousStructOrUnion()) {
+		llvm::Constant *StaticData[] = {
+			EmitCheckSourceLocation(Loc),
+		};
+
+		auto &layout = getTypes().getCGRecordLayout(ClassDecl);
+		std::string dstStr = layout.getLLVMType()->getName();
+		remove_useless_str(dstStr);
+		uint64_t dstValue = GetHashValue(dstStr);
+		llvm::Value *cast =  llvm::ConstantInt::get(Int64Ty, dstValue);
+		llvm::Value *DynamicArgs[] = { Base, Derived, cast };
+
+		TypeSanEmitCheck("__changing_type_casting_verification", StaticData,
+				DynamicArgs, dstStr, dstValue);
+	}
+}
+
 void CodeGenFunction::EmitVTablePtrCheckForCast(QualType T,
                                                 llvm::Value *Derived,
                                                 bool MayBeNull,

@@ -257,6 +257,7 @@ void initializeRegionViewerPass(PassRegistry&);
 void initializeReversePostOrderFunctionAttrsPass(PassRegistry&);
 void initializeRewriteStatepointsForGCPass(PassRegistry&);
 void initializeSafeStackPass(PassRegistry&);
+void initializeMetaStackPass(PassRegistry&);
 void initializeSCCPPass(PassRegistry&);
 void initializeSROALegacyPassPass(PassRegistry&);
 void initializeSROA_DTPass(PassRegistry&);
@@ -324,6 +325,8 @@ void initializeLoopLoadEliminationPass(PassRegistry&);
 void initializeFunctionImportPassPass(PassRegistry &);
 void initializeLoopVersioningPassPass(PassRegistry &);
 void initializeWholeProgramDevirtPass(PassRegistry &);
+void initializeTypeSanPass(PassRegistry&);
+void initializeTypeSanTreePass(PassRegistry&);
 }
 
 #endif

@@ -3048,6 +3048,23 @@ public:
                  StringRef CheckName, ArrayRef<llvm::Constant *> StaticArgs,
                  ArrayRef<llvm::Value *> DynamicArgs);
 
+
+  /// \brief Emit a HexEmitCheck
+  void TypeSanEmitCheck(StringRef CheckName, ArrayRef<llvm::Constant *> StaticArgs,
+                 ArrayRef<llvm::Value *> DynamicArgs,
+		 std::string dstStr,
+		 uint64_t dstValue);
+  
+  /// \brief Emit a HexEmitTypeSanCheckerForCast
+  void EmitTypeSanCheckForCast(QualType T, llvm::Value *Base,
+                                 bool MayBeNull, CFITypeCheckKind TCK,
+                                 SourceLocation Loc);
+  
+  /// \brief Emit a HexEmitTypeSanCheckerForChangingCast
+  void EmitTypeSanCheckForChangingCast(QualType T, llvm::Value *Base, llvm::Value *Derived,
+                                 bool MayBeNull, CFITypeCheckKind TCK,
+                                 SourceLocation Loc);
+
   /// \brief Emit a slow path cross-DSO CFI check which calls __cfi_slowpath
   /// if Cond if false.
   void EmitCfiSlowPathCheck(SanitizerMask Kind, llvm::Value *Cond,

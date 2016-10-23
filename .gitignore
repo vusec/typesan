@@ -1,0 +1,11 @@
+*.la
+*.o
+/autosetup-log.txt
+/autosetup-log.txt.*
+/autosetup.dir/
+/build/
+/gperftools-metalloc/
+/run-firefox-*.sh
+/run-spec-*.sh
+/run-ubench-*.sh
+

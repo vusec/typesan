@@ -178,6 +178,15 @@ static void addBoundsCheckingPass(const PassManagerBuilder &Builder,
   PM.add(createBoundsCheckingPass());
 }
 
+static void addTypeSanPass(const PassManagerBuilder &Builder,
+                                    PassManagerBase &PM) {
+   PM.add(createTypeSanPass());
+}
+
+static void addTypeSanTreePass(const PassManagerBuilder &Builder,
+                                    PassManagerBase &PM) {
+   PM.add(createTypeSanTreePass());
+}
 static void addSanitizerCoveragePass(const PassManagerBuilder &Builder,
                                      legacy::PassManagerBase &PM) {
   const PassManagerBuilderWrapper &BuilderWrapper =
@@ -404,6 +413,18 @@ void EmitAssemblyHelper::CreatePasses(FunctionInfoIndex *FunctionIndex) {
                            addDataFlowSanitizerPass);
   }
 
+  
+  if (LangOpts.Sanitize.has(SanitizerKind::TypeSan)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
+                           addTypeSanPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addTypeSanTreePass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addTypeSanPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addTypeSanPass);
+  }
+
   // Set up the per-function pass manager.
   legacy::FunctionPassManager *FPM = getPerFunctionPasses();
   if (CodeGenOpts.VerifyModule)
@@ -615,6 +636,10 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   // inlining happening.
   if (CodeGenOpts.OptimizationLevel > 0)
     PM->add(createObjCARCContractPass());
+
+  // Add passes to reorganize memory layout for metadata tracking
+  if (LangOpts.Sanitize.has(SanitizerKind::TypeSan))
+    PM->add(createMetaStackPass());
 
   if (TM->addPassesToEmitFile(*PM, OS, CGFT,
                               /*DisableVerify=*/!CodeGenOpts.VerifyModule)) {

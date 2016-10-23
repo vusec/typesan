@@ -1,0 +1,4 @@
+fun:_ZNKSt[0-9]*
+fun:_ZNSt[0-9]*
+fun:_ZN7cModule4gateEi
+fun:_ZNK7cModule4gateEi

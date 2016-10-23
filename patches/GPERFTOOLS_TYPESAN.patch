@@ -1,0 +1,500 @@
+From 7acd6447f93bff315360ab2180842fa3c5d929a2 Mon Sep 17 00:00:00 2001
+From: Istvan Haller <hal_ler@yahoo.com>
+Date: Fri, 13 May 2016 23:16:58 +0200
+Subject: [PATCH] Metalloc for type checking.
+
+---
+ Makefile.am                  |   13 +++--
+ src/central_freelist.cc      |   28 +++++++++-
+ src/common.cc                |   14 +++++
+ src/common.h                 |    1 +
+ src/malloc_hook_mmap_linux.h |   38 ++++++++++++++
+ src/tcmalloc.cc              |  117 ++++++++++++++++++++++++++++++++++++++----
+ 6 files changed, 194 insertions(+), 17 deletions(-)
+
+diff --git a/Makefile.am b/Makefile.am
+index b5f4725..b3b4e76 100755
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -9,14 +9,14 @@ ACLOCAL_AMFLAGS = -I m4
+ AUTOMAKE_OPTIONS = subdir-objects
+ 
+ # This is so we can #include <gperftools/foo>
+-AM_CPPFLAGS = -I$(top_srcdir)/src
++AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_srcdir)/../metapagetable
+ 
+ if !WITH_STACK_TRACE
+ AM_CPPFLAGS += -DNO_TCMALLOC_SAMPLES
+ endif !WITH_STACK_TRACE
+ 
+ # This is mostly based on configure options
+-AM_CXXFLAGS =
++AM_CXXFLAGS = -I$(top_srcdir)/../metapagetable
+ 
+ NO_BUILTIN_CXXFLAGS =
+ 
+@@ -328,7 +328,8 @@ low_level_alloc_unittest_SOURCES = src/base/low_level_alloc.cc \
+ # By default, MallocHook takes stack traces for use by the heap-checker.
+ # We don't need that functionality here, so we turn it off to reduce deps.
+ low_level_alloc_unittest_CXXFLAGS = -DNO_TCMALLOC_SAMPLES
+-low_level_alloc_unittest_LDADD = $(LIBSPINLOCK) libmaybe_threads.la
++low_level_alloc_unittest_LDADD = $(LIBSPINLOCK) libmaybe_threads.la $(top_srcdir)/../metapagetable/libmetapagetable.la
++EXTRA_low_level_alloc_unittest_DEPENDENCIES = $(top_srcdir)/../metapagetable/libmetapagetable.la
+ 
+ TESTS += atomicops_unittest
+ ATOMICOPS_UNITTEST_INCLUDES = src/base/atomicops.h \
+@@ -492,7 +493,8 @@ libtcmalloc_minimal_la_CXXFLAGS = -DNO_TCMALLOC_SAMPLES \
+                                   $(PTHREAD_CFLAGS) -DNDEBUG $(AM_CXXFLAGS)
+ # -version-info gets passed to libtool
+ libtcmalloc_minimal_la_LDFLAGS = -version-info @TCMALLOC_SO_VERSION@ $(AM_LDFLAGS)
+-libtcmalloc_minimal_la_LIBADD = libtcmalloc_minimal_internal.la
++libtcmalloc_minimal_la_LIBADD = libtcmalloc_minimal_internal.la $(top_srcdir)/../metapagetable/libmetapagetable.la
++EXTRA_libtcmalloc_minimal_la_DEPENDENCIES = $(top_srcdir)/../metapagetable/libmetapagetable.la
+ 
+ # For windows, we're playing around with trying to do some stacktrace
+ # support even with libtcmalloc_minimal.  For everyone else, though,
+@@ -910,7 +912,8 @@ lib_LTLIBRARIES += libtcmalloc.la
+ libtcmalloc_la_SOURCES = $(TCMALLOC_CC) $(TCMALLOC_INCLUDES)
+ libtcmalloc_la_CXXFLAGS = $(PTHREAD_CFLAGS) -DNDEBUG $(AM_CXXFLAGS)
+ libtcmalloc_la_LDFLAGS = $(PTHREAD_CFLAGS) -version-info @TCMALLOC_SO_VERSION@
+-libtcmalloc_la_LIBADD = libtcmalloc_internal.la libmaybe_threads.la $(PTHREAD_LIBS)
++libtcmalloc_la_LIBADD = libtcmalloc_internal.la libmaybe_threads.la $(PTHREAD_LIBS) $(top_srcdir)/../metapagetable/libmetapagetable.la
++EXTRA_libtcmalloc_la_DEPENDENCIES = $(top_srcdir)/../metapagetable/libmetapagetable.la
+ 
+ if WITH_HEAP_CHECKER
+ # heap-checker-bcad is last, in hopes its global ctor will run first.
+diff --git a/src/central_freelist.cc b/src/central_freelist.cc
+index 11b190d..38541c4 100644
+--- a/src/central_freelist.cc
++++ b/src/central_freelist.cc
+@@ -38,6 +38,7 @@
+ #include "linked_list.h"       // for SLL_Next, SLL_Push, etc
+ #include "page_heap.h"         // for PageHeap
+ #include "static_vars.h"       // for Static
++#include <metapagetable.h>
+ 
+ using std::min;
+ using std::max;
+@@ -139,6 +140,14 @@ void CentralFreeList::ReleaseToSpans(void* object) {
+     lock_.Unlock();
+     {
+       SpinLockHolder h(Static::pageheap_lock());
++
++      if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++          unsigned long metaentry = get_metapagetable_entry((void*)(span->start << kPageShift));
++          set_metapagetable_entries((void*)(span->start << kPageShift), span->length << kPageShift, 0, 0);
++          Span* metaspan = MapObjectToSpan((void*)(metaentry >> 8));
++          Static::pageheap()->Delete(metaspan);
++      }
++
+       Static::pageheap()->Delete(span);
+     }
+     lock_.Lock();
+@@ -327,7 +336,24 @@ void CentralFreeList::Populate() {
+   {
+     SpinLockHolder h(Static::pageheap_lock());
+     span = Static::pageheap()->New(npages);
+-    if (span) Static::pageheap()->RegisterSizeClass(span, size_class_);
++    if (span) {
++      Static::pageheap()->RegisterSizeClass(span, size_class_);
++
++      // Meta-pagetable might not be initialized yet.
++      page_table_init();
++      if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++          int alignment = AlignmentBitsForSize(Static::sizemap()->ByteSizeForClass(size_class_));
++          int rounding_offset = (1 << alignment) - 1;
++          Span* metaspan = Static::pageheap()->New((span->length * FLAGS_METALLOC_METADATABYTES + rounding_offset) >> alignment);
++          if (metaspan != NULL) {  
++            set_metapagetable_entries((void*)(span->start << kPageShift), span->length << kPageShift, 
++                  (void*)(metaspan->start << kPageShift), alignment);
++          } else {
++            Static::pageheap()->Delete(span);
++            span = NULL;
++          }
++      }
++    }
+   }
+   if (span == NULL) {
+     Log(kLog, __FILE__, __LINE__,
+diff --git a/src/common.cc b/src/common.cc
+index 2cf507e..fa2e106 100644
+--- a/src/common.cc
++++ b/src/common.cc
+@@ -37,6 +37,7 @@
+ #include "system-alloc.h"
+ #include "base/spinlock.h"
+ #include "getenv_safe.h" // TCMallocGetenvSafe
++#include <metapagetable.h>
+ 
+ namespace tcmalloc {
+ 
+@@ -96,6 +97,16 @@ int AlignmentForSize(size_t size) {
+   return alignment;
+ }
+ 
++int AlignmentBitsForSize(size_t size) {
++  if (size > kMaxSize) {
++    // Cap alignment at kPageSize for large sizes.
++    return __builtin_ctzll(kPageSize);
++  } else {
++    // Return number of trailing 0-bits as alignment
++    return __builtin_ctzll(size);
++  }
++}
++
+ int SizeMap::NumMoveSize(size_t size) {
+   if (size == 0) return 0;
+   // Use approx 64k transfers between thread and central caches.
+@@ -185,6 +196,9 @@ void SizeMap::Init() {
+     for (int s = next_size; s <= max_size_in_class; s += kAlignment) {
+       class_array_[ClassIndex(s)] = c;
+     }
++    if (class_to_pages_[c] < 32) {
++        class_to_pages_[c] = 32;
++    }
+     next_size = max_size_in_class + kAlignment;
+   }
+ 
+diff --git a/src/common.h b/src/common.h
+index 15d7ee7..16ffbc7 100644
+--- a/src/common.h
++++ b/src/common.h
+@@ -156,6 +156,7 @@ inline Length pages(size_t bytes) {
+ // For larger allocation sizes, we use larger memory alignments to
+ // reduce the number of size classes.
+ int AlignmentForSize(size_t size);
++int AlignmentBitsForSize(size_t size);
+ 
+ // Size-class information + mapping
+ class SizeMap {
+diff --git a/src/malloc_hook_mmap_linux.h b/src/malloc_hook_mmap_linux.h
+index 0f531db..906ccf2 100755
+--- a/src/malloc_hook_mmap_linux.h
++++ b/src/malloc_hook_mmap_linux.h
+@@ -45,6 +45,7 @@
+ #include <sys/mman.h>
+ #include <errno.h>
+ #include "base/linux_syscall_support.h"
++#include <metapagetable.h>
+ 
+ // The x86-32 case and the x86-64 case differ:
+ // 32b has a mmap2() syscall, 64b does not.
+@@ -121,6 +122,7 @@ static inline void* do_mmap64(void *start, size_t length,
+ 
+ #endif  // #if defined(__x86_64__)
+ 
++void *metalloc_sentinel = 0;
+ 
+ #ifdef MALLOC_HOOK_HAVE_DO_MMAP64
+ 
+@@ -161,6 +163,13 @@ extern "C" void* mmap64(void *start, size_t length, int prot, int flags,
+     result = do_mmap64(start, length, prot, flags, fd, offset);
+   }
+   MallocHook::InvokeMmapHook(result, start, length, prot, flags, fd, offset);
++  if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++    if (metalloc_sentinel == 0) {
++        metalloc_sentinel = do_mmap64(0, METALLOC_PAGESIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    }
++    unsigned int rounded_length = (((length + METALLOC_PAGESIZE - 1) / METALLOC_PAGESIZE) * METALLOC_PAGESIZE);
++    set_metapagetable_entries(result, rounded_length, metalloc_sentinel, 63);
++  }
+   return result;
+ }
+ 
+@@ -176,6 +185,13 @@ extern "C" void* mmap(void *start, size_t length, int prot, int flags,
+                        static_cast<size_t>(offset)); // avoid sign extension
+   }
+   MallocHook::InvokeMmapHook(result, start, length, prot, flags, fd, offset);
++  if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++    if (metalloc_sentinel == 0) {
++        metalloc_sentinel = do_mmap64(0, METALLOC_PAGESIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    }
++    unsigned int rounded_length = (((length + METALLOC_PAGESIZE - 1) / METALLOC_PAGESIZE) * METALLOC_PAGESIZE);
++    set_metapagetable_entries(result, rounded_length, metalloc_sentinel, 63);
++  }
+   return result;
+ }
+ 
+@@ -187,6 +203,10 @@ extern "C" int munmap(void* start, size_t length) __THROW {
+   if (!MallocHook::InvokeMunmapReplacement(start, length, &result)) {
+     result = sys_munmap(start, length);
+   }
++  if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++    unsigned int rounded_length = (((length + METALLOC_PAGESIZE - 1) / METALLOC_PAGESIZE) * METALLOC_PAGESIZE);
++    set_metapagetable_entries(start, rounded_length, 0, 0);
++  }
+   return result;
+ }
+ 
+@@ -199,6 +219,17 @@ extern "C" void* mremap(void* old_addr, size_t old_size, size_t new_size,
+   void* result = sys_mremap(old_addr, old_size, new_size, flags, new_address);
+   MallocHook::InvokeMremapHook(result, old_addr, old_size, new_size, flags,
+                                new_address);
++  if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++    set_metapagetable_entries(old_addr, old_size, 0, 0);
++    if (metalloc_sentinel == 0) {
++        metalloc_sentinel = do_mmap64(0, METALLOC_PAGESIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    }
++    unsigned int rounded_length;
++    rounded_length = (((old_size + METALLOC_PAGESIZE - 1) / METALLOC_PAGESIZE) * METALLOC_PAGESIZE);
++    set_metapagetable_entries(old_addr, rounded_length, 0, 0);
++    rounded_length = (((new_size + METALLOC_PAGESIZE - 1) / METALLOC_PAGESIZE) * METALLOC_PAGESIZE);
++    set_metapagetable_entries(result, rounded_length, metalloc_sentinel, 63);
++  }
+   return result;
+ }
+ 
+@@ -210,6 +241,13 @@ extern "C" void* sbrk(ptrdiff_t increment) __THROW {
+   MallocHook::InvokePreSbrkHook(increment);
+   void *result = __sbrk(increment);
+   MallocHook::InvokeSbrkHook(result, increment);
++  if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++    if (metalloc_sentinel == 0) {
++        metalloc_sentinel = do_mmap64(0, METALLOC_PAGESIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    }
++    unsigned int rounded_length = (((increment + METALLOC_PAGESIZE - 1) / METALLOC_PAGESIZE) * METALLOC_PAGESIZE);
++    set_metapagetable_entries(result, rounded_length, metalloc_sentinel, 63);
++  }
+   return result;
+ }
+ 
+diff --git a/src/tcmalloc.cc b/src/tcmalloc.cc
+index 387ba76..939d853 100644
+--- a/src/tcmalloc.cc
++++ b/src/tcmalloc.cc
+@@ -131,6 +131,7 @@
+ #include "system-alloc.h"      // for DumpSystemAllocatorStats, etc
+ #include "tcmalloc_guard.h"    // for TCMallocGuard
+ #include "thread_cache.h"      // for ThreadCache
++#include <metapagetable.h>
+ 
+ #ifdef __clang__
+ // clang's apparent focus on code size somehow causes it to ignore
+@@ -1139,8 +1140,24 @@ inline bool should_report_large(Length num_pages) {
+   return false;
+ }
+ 
++static ALWAYS_INLINE void* clear_metadata_ptr(void *ptr, size_t size) {
++  unsigned long page = (unsigned long)ptr / METALLOC_PAGESIZE;
++  unsigned long entry = pageTable[page];
++  unsigned long alignment = entry & 0xFF;
++  char *metabase = (char*)(entry >> 8);
++  unsigned long *metaptr = (unsigned long*)(metabase + ((((unsigned long)ptr - (page * METALLOC_PAGESIZE)) >> alignment) * FLAGS_METALLOC_METADATABYTES));
++  void *result = (void*)(*metaptr);
++  if (result != 0) {
++    unsigned long metasize = (FLAGS_METALLOC_METADATABYTES / 8) * ((size + (1 << (alignment)) - 1) >> alignment);
++    for (unsigned long i = 0; i < metasize; ++i) {
++      metaptr[i] = 0;
++    }
++  }
++  return result;
++}
++
+ // Helper for do_malloc().
+-inline void* do_malloc_pages(ThreadCache* heap, size_t size) {
++inline void* do_malloc_pages(ThreadCache* heap, size_t &size) {
+   void* result;
+   bool report_large;
+ 
+@@ -1155,6 +1172,22 @@ inline void* do_malloc_pages(ThreadCache* heap, size_t size) {
+   } else {
+     SpinLockHolder h(Static::pageheap_lock());
+     Span* span = Static::pageheap()->New(num_pages);
++
++    if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++        if (span != NULL) {
++          int alignment = kPageShift;
++          int rounding_offset = (1 << alignment) - 1;
++          Span* metaspan = Static::pageheap()->New((span->length * FLAGS_METALLOC_METADATABYTES  + rounding_offset) >> alignment);
++          if (metaspan != 0) {
++            set_metapagetable_entries((void*)(span->start << kPageShift), span->length << kPageShift, 
++                (void*)(metaspan->start << kPageShift), alignment);
++          } else {
++            Static::pageheap()->Delete(span);
++            span = NULL;
++          }
++        }
++    }
++
+     result = (UNLIKELY(span == NULL) ? NULL : SpanToMallocResult(span));
+     report_large = should_report_large(num_pages);
+   }
+@@ -1165,9 +1198,10 @@ inline void* do_malloc_pages(ThreadCache* heap, size_t size) {
+   return result;
+ }
+ 
+-ALWAYS_INLINE void* do_malloc_small(ThreadCache* heap, size_t size) {
++ALWAYS_INLINE void* do_malloc_small(ThreadCache* heap, size_t &size) {
+   ASSERT(Static::IsInited());
+   ASSERT(heap != NULL);
++
+   size_t cl = Static::sizemap()->SizeClass(size);
+   size = Static::sizemap()->class_to_size(cl);
+ 
+@@ -1181,14 +1215,21 @@ ALWAYS_INLINE void* do_malloc_small(ThreadCache* heap, size_t size) {
+ }
+ 
+ ALWAYS_INLINE void* do_malloc(size_t size) {
++  void *result;
++  bool doNotClear = size & ((size_t)1 << (sizeof(size_t) * 8 - 1));
++  size &= ((size_t)1 << (sizeof(size_t) * 8 - 1)) - 1;
+   if (ThreadCache::have_tls &&
+       LIKELY(size < ThreadCache::MinSizeForSlowPath())) {
+-    return do_malloc_small(ThreadCache::GetCacheWhichMustBePresent(), size);
++    result = do_malloc_small(ThreadCache::GetCacheWhichMustBePresent(), size);
+   } else if (size <= kMaxSize) {
+-    return do_malloc_small(ThreadCache::GetCache(), size);
++    result = do_malloc_small(ThreadCache::GetCache(), size);
+   } else {
+-    return do_malloc_pages(ThreadCache::GetCache(), size);
++    result = do_malloc_pages(ThreadCache::GetCache(), size);
+   }
++  if (!doNotClear) {
++    clear_metadata_ptr(result, size);
++  }
++  return result;
+ }
+ 
+ static void *retry_malloc(void* size) {
+@@ -1205,11 +1246,13 @@ ALWAYS_INLINE void* do_malloc_or_cpp_alloc(size_t size) {
+ }
+ 
+ ALWAYS_INLINE void* do_calloc(size_t n, size_t elem_size) {
++  size_t doNotClearFlag = elem_size & ((size_t)1 << (sizeof(size_t) * 8 - 1));
++  elem_size &= ((size_t)1 << (sizeof(size_t) * 8 - 1)) - 1;
+   // Overflow check
+-  const size_t size = n * elem_size;
++  const size_t size = (n * elem_size);
+   if (elem_size != 0 && size / elem_size != n) return NULL;
+ 
+-  void* result = do_malloc_or_cpp_alloc(size);
++  void* result = do_malloc_or_cpp_alloc(size | doNotClearFlag);
+   if (result != NULL) {
+     if (size <= kMaxSize)
+       memset(result, 0, size);
+@@ -1271,6 +1314,7 @@ ALWAYS_INLINE void do_free_helper(void* ptr,
+     Static::pageheap()->CacheSizeClass(p, cl);
+   }
+   ASSERT(ptr != NULL);
++
+   if (LIKELY(cl != 0)) {
+     ASSERT(!Static::pageheap()->GetDescriptor(p)->sample);
+     if (heap_must_be_valid || heap != NULL) {
+@@ -1290,6 +1334,15 @@ ALWAYS_INLINE void do_free_helper(void* ptr,
+       Static::stacktrace_allocator()->Delete(st);
+       span->objects = NULL;
+     }
++
++    if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++        unsigned long metaentry = get_metapagetable_entry((void*)(span->start << kPageShift));
++        set_metapagetable_entries((void*)(span->start << kPageShift), span->length << kPageShift, 0, 0);
++        const PageID metapage = (metaentry >> 8) >> kPageShift;
++        Span* metaspan = Static::pageheap()->GetDescriptor(metapage);
++        Static::pageheap()->Delete(metaspan);
++    }
++
+     Static::pageheap()->Delete(span);
+   }
+ }
+@@ -1346,6 +1399,8 @@ ALWAYS_INLINE void* do_realloc_with_callback(
+     void* old_ptr, size_t new_size,
+     void (*invalid_free_fn)(void*),
+     size_t (*invalid_get_size_fn)(const void*)) {
++  size_t doNotClearFlag = new_size & ((size_t)1 << (sizeof(size_t) * 8 - 1));
++  new_size &= ((size_t)1 << (sizeof(size_t) * 8 - 1)) - 1;
+   // Get the size of the old entry
+   const size_t old_size = GetSizeWithCallback(old_ptr, invalid_get_size_fn);
+ 
+@@ -1362,11 +1417,11 @@ ALWAYS_INLINE void* do_realloc_with_callback(
+     void* new_ptr = NULL;
+ 
+     if (new_size > old_size && new_size < lower_bound_to_grow) {
+-      new_ptr = do_malloc_or_cpp_alloc(lower_bound_to_grow);
++      new_ptr = do_malloc_or_cpp_alloc(lower_bound_to_grow | doNotClearFlag);
+     }
+     if (new_ptr == NULL) {
+       // Either new_size is not a tiny increment, or last do_malloc failed.
+-      new_ptr = do_malloc_or_cpp_alloc(new_size);
++      new_ptr = do_malloc_or_cpp_alloc(new_size | doNotClearFlag);
+     }
+     if (UNLIKELY(new_ptr == NULL)) {
+       return NULL;
+@@ -1402,11 +1457,15 @@ ALWAYS_INLINE void* do_realloc(void* old_ptr, size_t new_size) {
+ void* do_memalign(size_t align, size_t size) {
+   ASSERT((align & (align - 1)) == 0);
+   ASSERT(align > 0);
++
++  size_t doNotClearFlag = size & ((size_t)1 << (sizeof(size_t) * 8 - 1));
++  size &= ((size_t)1 << (sizeof(size_t) * 8 - 1)) - 1;
++
+   if (size + align < size) return NULL;         // Overflow
+ 
+   // Fall back to malloc if we would already align this memory access properly.
+   if (align <= AlignmentForSize(size)) {
+-    void* p = do_malloc(size);
++    void* p = do_malloc(size | doNotClearFlag);
+     ASSERT((reinterpret_cast<uintptr_t>(p) % align) == 0);
+     return p;
+   }
+@@ -1431,7 +1490,11 @@ void* do_memalign(size_t align, size_t size) {
+     if (cl < kNumClasses) {
+       ThreadCache* heap = ThreadCache::GetCache();
+       size = Static::sizemap()->class_to_size(cl);
+-      return CheckedMallocResult(heap->Allocate(size, cl));
++      void *result = CheckedMallocResult(heap->Allocate(size, cl));
++      if (!doNotClearFlag) {
++        clear_metadata_ptr(result, size);
++      }
++      return result;
+     }
+   }
+ 
+@@ -1443,6 +1506,22 @@ void* do_memalign(size_t align, size_t size) {
+     // TODO: We could put the rest of this page in the appropriate
+     // TODO: cache but it does not seem worth it.
+     Span* span = Static::pageheap()->New(tcmalloc::pages(size));
++
++    if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++        if (span != NULL) {
++          int alignment = kPageShift;
++          int rounding_offset = (1 << alignment) - 1;
++          Span* metaspan = Static::pageheap()->New((span->length * FLAGS_METALLOC_METADATABYTES  + rounding_offset) >> alignment);
++          if (metaspan != 0) {
++            set_metapagetable_entries((void*)(span->start << kPageShift), span->length << kPageShift, 
++                (void*)(metaspan->start << kPageShift), alignment);
++          } else {
++            Static::pageheap()->Delete(span);
++            span = NULL;
++          }
++        }
++    }
++
+     return UNLIKELY(span == NULL) ? NULL : SpanToMallocResult(span);
+   }
+ 
+@@ -1470,6 +1549,22 @@ void* do_memalign(size_t align, size_t size) {
+     Span* trailer = Static::pageheap()->Split(span, needed);
+     Static::pageheap()->Delete(trailer);
+   }
++
++  if (!FLAGS_METALLOC_FIXEDCOMPRESSION) {
++      if (span != NULL) {
++        int alignment = kPageShift;
++        int rounding_offset = (1 << alignment) - 1;
++        Span* metaspan = Static::pageheap()->New((span->length * FLAGS_METALLOC_METADATABYTES  + rounding_offset) >> alignment);
++        if (metaspan != 0) {
++          set_metapagetable_entries((void*)(span->start << kPageShift), span->length << kPageShift, 
++             (void*)(metaspan->start << kPageShift), alignment);
++        } else {
++          Static::pageheap()->Delete(span); 
++          span = NULL;
++        }
++      }
++  }
++
+   return SpanToMallocResult(span);
+ }
+ 
+-- 
+1.7.9.5
+

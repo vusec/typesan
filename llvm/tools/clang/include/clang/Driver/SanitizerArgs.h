@@ -46,6 +46,8 @@ class SanitizerArgs {
   bool needsSharedAsanRt() const { return AsanSharedRuntime; }
   bool needsTsanRt() const { return Sanitizers.has(SanitizerKind::Thread); }
   bool needsMsanRt() const { return Sanitizers.has(SanitizerKind::Memory); }
+  bool needsTypeSanRt() const { return Sanitizers.has(SanitizerKind::TypeSan); }
+  bool needsMetallocRt() const { return Sanitizers.has(SanitizerKind::TypeSan); }
   bool needsLsanRt() const {
     return Sanitizers.has(SanitizerKind::Leak) &&
            !Sanitizers.has(SanitizerKind::Address);

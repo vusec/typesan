@@ -1442,6 +1442,26 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
                                     CodeGenFunction::CFITCK_DerivedCast,
                                     CE->getLocStart());
 
+    if (CGF.SanOpts.has(SanitizerKind::TypeSan))
+    { 
+      llvm::Value *NonVirtualOffset = CGF.CGM.GetNonVirtualBaseClassOffset(DerivedClassDecl, CE->path_begin(), CE->path_end());
+      if (!NonVirtualOffset) {
+        CGF.EmitTypeSanCheckForCast(DestTy->getPointeeType(),
+                                    Base.getPointer(),
+                                    /*MayBeNull=*/false,
+                                    CodeGenFunction::CFITCK_DerivedCast,
+                                    CE->getLocStart());
+      } else {
+        CGF.EmitTypeSanCheckForChangingCast(DestTy->getPointeeType(),
+                                    Base.getPointer(),
+                                    Derived.getPointer(),
+                                    /*MayBeNull=*/false,
+                                    CodeGenFunction::CFITCK_DerivedCast,
+                                    CE->getLocStart());
+      }
+    }
+    
+
     return Derived.getPointer();
   }
   case CK_UncheckedDerivedToBase:

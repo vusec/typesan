@@ -27,6 +27,7 @@ add_llvm_library(LLVMTransformUtils
   LoopVersioning.cpp
   LowerInvoke.cpp
   LowerSwitch.cpp
+  TypeSanUtil.cpp
   Mem2Reg.cpp
   MemorySSA.cpp
   MetaRenamer.cpp

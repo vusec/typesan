@@ -675,6 +675,10 @@ namespace llvm {
   /// This pass splits the stack into a safe stack and an unsafe stack to
   /// protect against stack-based overflow vulnerabilities.
   FunctionPass *createSafeStackPass(const TargetMachine *TM = nullptr);
+
+  /// This pass moves designated objects to a secondary tracked stack,
+  /// where metadata is available.
+  FunctionPass *createMetaStackPass(const TargetMachine *TM = nullptr);
 } // End llvm namespace
 
 /// Target machine pass initializer for passes with dependencies. Use with

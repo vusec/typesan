@@ -26,7 +26,7 @@ using namespace clang::driver;
 using namespace llvm::opt;
 
 enum : SanitizerMask {
-  NeedsUbsanRt = Undefined | Integer | CFI,
+  NeedsUbsanRt = Undefined | Integer | CFI | TypeSan ,
   NeedsUbsanCxxRt = Vptr | CFI,
   NotAllowedWithTrap = Vptr,
   RequiresPIE = DataFlow,

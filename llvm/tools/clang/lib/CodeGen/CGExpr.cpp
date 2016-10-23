@@ -2446,6 +2446,53 @@ static void emitCheckHandlerCall(CodeGenFunction &CGF,
   }
 }
 
+void CodeGenFunction::TypeSanEmitCheck(
+//    ArrayRef<std::pair<llvm::Value *, SanitizerMask>> Checked,
+    StringRef FunctionName, ArrayRef<llvm::Constant *> StaticArgs,
+    ArrayRef<llvm::Value *> DynamicArgs,
+    std::string dstStr,
+    uint64_t dstValue) {
+  int blacklisted;
+
+  blacklisted = CGM.getContext().getSanitizerBlacklist().isBlacklistedFunction(CurFn->getName()) ? 1 : 0;
+  if (blacklisted) return;
+
+  llvm::Constant *Info = llvm::ConstantStruct::getAnon(StaticArgs);
+  auto *InfoPtr =
+      new llvm::GlobalVariable(CGM.getModule(), Info->getType(), false,
+                               llvm::GlobalVariable::PrivateLinkage, Info);
+  InfoPtr->setUnnamedAddr(true);
+  CGM.getSanitizerMetadata()->disableSanitizerForGlobal(InfoPtr);
+
+  SmallVector<llvm::Value *, 4> Args;
+  SmallVector<llvm::Type *, 4> ArgTypes;
+  Args.reserve(DynamicArgs.size() + 1);
+  ArgTypes.reserve(DynamicArgs.size() + 1);
+
+  // Handler functions take an i8* pointing to the (handler-specific) static
+  // information block, followed by a sequence of intptr_t arguments
+  // representing operand values.
+  //Args.push_back(Builder.CreateBitCast(InfoPtr, Int8PtrTy));
+  //ArgTypes.push_back(Int8PtrTy);
+  for (size_t i = 0, n = DynamicArgs.size(); i != n; ++i) {
+    Args.push_back(EmitCheckValue(DynamicArgs[i]));
+    ArgTypes.push_back(IntPtrTy);
+  }
+
+  llvm::AttrBuilder B;
+  B.addAttribute(llvm::Attribute::UWTable);
+
+  llvm::FunctionType *FnType =
+    llvm::FunctionType::get(CGM.VoidTy, ArgTypes, false);
+
+  llvm::Value *Fn = CGM.CreateRuntimeFunction(
+    FnType, FunctionName,
+    llvm::AttributeSet::get(getLLVMContext(),
+                            llvm::AttributeSet::FunctionIndex, B));
+
+  EmitNounwindRuntimeCall(Fn, Args);
+}
+
 void CodeGenFunction::EmitCheck(
     ArrayRef<std::pair<llvm::Value *, SanitizerMask>> Checked,
     StringRef CheckName, ArrayRef<llvm::Constant *> StaticArgs,
@@ -3617,6 +3664,25 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
     if (sanitizePerformTypeCheck())
       EmitTypeCheck(TCK_DowncastReference, E->getExprLoc(),
                     Derived.getPointer(), E->getType());
+
+    // Check bad-casting by TypeSan
+    if (SanOpts.has(SanitizerKind::TypeSan)) {
+      llvm::Value *NonVirtualOffset = CGM.GetNonVirtualBaseClassOffset(DerivedClassDecl, E->path_begin(), E->path_end());
+      if (!NonVirtualOffset) {
+        EmitTypeSanCheckForCast(E->getType(),
+                                    LV.getAddress().getPointer(),
+                                    /*MayBeNull=*/false,
+                                    CFITCK_DerivedCast,
+                                    E->getLocStart());
+      } else {
+        EmitTypeSanCheckForChangingCast(E->getType(), 
+                                    LV.getAddress().getPointer(),
+                                    Derived.getPointer(),
+                                    /*MayBeNull=*/false,
+                                    CFITCK_DerivedCast,
+                                    E->getLocStart());
+      }
+    }
 
     if (SanOpts.has(SanitizerKind::CFIDerivedCast))
       EmitVTablePtrCheckForCast(E->getType(), Derived.getPointer(),

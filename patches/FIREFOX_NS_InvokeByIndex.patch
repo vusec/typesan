@@ -1,0 +1,76 @@
+--- xpcom/reflect/xptcall/md/unix/xptcinvoke_x86_64_unix.cpp	2016-06-13 09:29:03.328955443 +0200
++++ xpcom/reflect/xptcall/md/unix/xptcinvoke_x86_64_unix.cpp	2016-06-17 10:03:29.021897758 +0200
+@@ -113,6 +113,59 @@
+ #pragma GCC target ("no-avx")
+ #endif
+ 
++static nsresult invoke(
++	uint64_t methodAddress,
++	nsISupports *that,
++	uint64_t *gpregs,
++	double *fpregs,
++	uint64_t *stack,
++	uint32_t nr_stack) {
++	nsresult result;
++	
++	uint64_t *stack_end = stack + nr_stack;
++	__asm__ volatile (
++		"mov %%rsp, %%rbx\n"
++		"test $8, %%rsp\n"
++		"jz 2f\n"
++		"sub $8, %%rsp\n"
++		"2:\n"
++		"test %3, %3\n"
++		"jz 1f\n"
++		"0:\n"
++		"sub $8, %2\n"
++		"push (%2)\n"
++		"dec %3\n"
++		"jnz 0b\n"
++		"1:\n"
++		"mov %4, %%rdi\n"
++		"mov 8(%5), %%rsi\n"
++		"mov 16(%5), %%rdx\n"
++		"mov 24(%5), %%rcx\n"
++		"mov 32(%5), %%r8\n"
++		"mov 40(%5), %%r9\n"
++		"movsd 0(%6), %%xmm0\n"
++		"movsd 8(%6), %%xmm1\n"
++		"movsd 16(%6), %%xmm2\n"
++		"movsd 24(%6), %%xmm3\n"
++		"movsd 32(%6), %%xmm4\n"
++		"movsd 40(%6), %%xmm5\n"
++		"movsd 48(%6), %%xmm6\n"
++		"movsd 56(%6), %%xmm7\n"
++		"call *%1\n"
++		"mov %%rbx, %%rsp\n"
++		: "=a" (result)
++		: "r" (methodAddress),
++		  "r" (stack_end),
++		  "r" (nr_stack),
++		  "r" (that), 
++		  "r" (gpregs), 
++		  "r" (fpregs)
++		: "rdi", "rsi", "rdx", "rcx", "r8", "r9", "rbx", "cc", "memory",
++		  "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7");
++
++	return result;
++}
++
+ // Avoid AddressSanitizer instrumentation for the next function because it
+ // depends on __builtin_alloca behavior and alignment that cannot be relied on
+ // once the function is compiled with a version of ASan that has dynamic-alloca
+@@ -174,12 +227,7 @@
+     methodAddress += 8 * methodIndex;
+     methodAddress = *((uint64_t *)methodAddress);
+     
+-    typedef nsresult (*Method)(uint64_t, uint64_t, uint64_t, uint64_t,
+-                               uint64_t, uint64_t, double, double, double,
+-                               double, double, double, double, double);
+-    nsresult result = ((Method)methodAddress)(a0, a1, a2, a3, a4, a5,
+-                                              d0, d1, d2, d3, d4, d5,
+-                                              d6, d7);
++    nsresult result = invoke(methodAddress, that, gpregs, fpregs, stack, nr_stack);
+     return result;
+ }
+ 
