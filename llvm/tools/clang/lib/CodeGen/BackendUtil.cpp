@@ -416,7 +416,7 @@ void EmitAssemblyHelper::CreatePasses(FunctionInfoIndex *FunctionIndex) {
   
   if (LangOpts.Sanitize.has(SanitizerKind::TypeSan)) {
     PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
-                           addTypeSanPass);
+                           addTypeSanTreePass);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
                            addTypeSanTreePass);
     PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
