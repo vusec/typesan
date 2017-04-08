@@ -23,8 +23,8 @@ If you do not want to build Firefox, set BUILD_FIREFOX=0.
 Follow the following instructions:
 
     sudo apt-get install autoconf bison build-essential git libtool libtool-bin
-    git clone ssh://git@git.cs.vu.nl:1337/i.haller/TypeSanOpenSource.git
-    cd TypeSanOpenSource
+    git clone https://github.com/vusec/typesan.git
+    cd typesan
     PATHSPEC="$HOME/cpu2006" ./autosetup.sh
 
 This sets up TypeSan and instruments all C++ SPEC CPU2006 benchmarks
